@@ -14,4 +14,6 @@ said, preferences.h is a lot nicer to work with than eeprom.h for persistent sto
 Fill in your wifi credentials in src/main.cpp. After doing so, you can configure the feeder from a web interface.
 The IP address is logged to the serial port when the microcontroller starts up.
 
-![sceenshot](img/screenshot.png)
+3D printable parts are in the models/ folder - I added a version of the arm asssembly with a 4mm diameter hole, which is about right for my betta.
+
+![screenshot](img/screenshot.png)
