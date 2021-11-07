@@ -23,8 +23,9 @@ const char* ssid = "ssid";
 const char* password = "password";
 #define WEB_SRV_PORT 80
 #define TZ_UTC_OFFSET (-8 * 60 * 60) // PST
-const int FILL_DEGREE = 5; // starting hole location, fill slider with fish food
-const int DISPENSE_DEGREE = 45; // dispensing hole location
+const int FILL_DEGREE = 87; // starting hole location, fill slider with fish food
+const int DISPENSE_DEGREE = 58; // dispensing hole location
+
 
 //// fish configuration ///////
 #define FEED_NUM_TIMES 2
@@ -32,6 +33,7 @@ const int DISPENSE_DEGREE = 45; // dispensing hole location
 
 // skip every Xth day (persists);
 bool doFastingDay = true;
+bool doAutoFeed = true;
 uint8_t fastingDayIndex = FASTING_DAY_IDX_DEFAULT;
 uint8_t feedHour1 = 8;
 uint8_t feedHour2 = 16; // TODO
@@ -56,6 +58,7 @@ void writePersistentStore() {
   prefs.putUInt("feedHour1", feedHour1);
   prefs.putUInt("feedHour2", feedHour2);
   prefs.putUInt("feedIndex", feedIndex);
+  prefs.putUInt("doAutoFeed", doAutoFeed);
 }
 
 void readPeristentStore() {
@@ -81,31 +84,61 @@ void readPeristentStore() {
   feedIndex = prefs.getUInt("feedIndex", feedIndex);
   Serial.print("feedIndex: ");
   Serial.println(feedIndex);
+
+  doAutoFeed = prefs.getBool("doAutoFeed", doAutoFeed);
+  Serial.print("doAutoFeed: ");
+  Serial.println(doAutoFeed ? "yes" : "no");
 }
 
 void initHardware() {
   Serial.begin(115200);
   Serial.println("---");
 
-  actuator.attach(servoPin);
   pinMode(LED_BUILTIN, OUTPUT);
+
+  pinMode(12, OUTPUT);
+  digitalWrite(12, HIGH);
 
   // it doesn't need to be fast
   setCpuFrequencyMhz(80);
+
+  actuator.attach(servoPin);
+  actuator.write(FILL_DEGREE); // tell servo to go to fill position
+  delay(1000); // sanity check, in case we started in a bad state
+  // turn power off
+  actuator.detach();
 
   prefs.begin("fishsrv", false);
   readPeristentStore();
 }
 
+bool lockIsFeeding = false;
+
 void feed() {
+  if (lockIsFeeding)
+  {
+    return;
+  }
+
+  lockIsFeeding = true;
   Serial.println("feed()");
+  actuator.attach(servoPin);
   
-  // todo: calibrate
-  actuator.write(FILL_DEGREE); // tell servo to go to fill position
-  delay(1000); // delay for 1 second
-  actuator.write(DISPENSE_DEGREE); // tell servo to go to dispense location
-  delay(1000); 
-  actuator.write(FILL_DEGREE); // tell servo to go back to fill position 
+  actuator.write(DISPENSE_DEGREE - 5); // overshoot to left
+  delay(450);
+  actuator.write(DISPENSE_DEGREE + 6);
+  // this should be as quick as possible to shake food loose:
+  delay(200);
+  actuator.write(DISPENSE_DEGREE);
+  delay(500); // wait for food to fall
+  
+  actuator.write(FILL_DEGREE);
+
+  delay(500);
+  // turn power off
+  actuator.detach();
+
+  lockIsFeeding = false;
 }
 
 void handleRoot(AsyncWebServerRequest* request) {
@@ -130,6 +163,11 @@ void handleRoot(AsyncWebServerRequest* request) {
   text += "</b> of <b>\n";
   text += FEED_NUM_TIMES;
   text += "</b> times thus far today.<br><br>";
+
+  text += "feed automatically:  <b>";
+  text += doAutoFeed ? "yes" : "no";
+  text += "</b> (<a href=\"#\" data-endpoint=\"'/api/toggleAutoFeed'\">toggle</a>)<br>\n";
+
   text += "enforce fasting day:  <b>";
   text += doFastingDay ? "yes" : "no";
   text += "</b> (<a href=\"#\" data-endpoint=\"'/api/toggleFasting'\">toggle</a>)<br>\n";
@@ -176,7 +214,7 @@ void connect() {
   WiFi.begin(ssid, password);
 
   int maxAttempts = 30;
-  int i = 30;
+  int i = 0;
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
@@ -205,6 +243,11 @@ void connect() {
     });
     server.on("/api/toggleFasting", HTTP_POST, [](AsyncWebServerRequest *request) {
       doFastingDay = !doFastingDay;
+      writePersistentStore();
+      request->send(200, "text/plain", "ok");
+    });
+    server.on("/api/toggleAutoFeed", HTTP_POST, [](AsyncWebServerRequest *request) {
+      doAutoFeed = !doAutoFeed;
       writePersistentStore();
       request->send(200, "text/plain", "ok");
     });
@@ -271,28 +314,30 @@ void setup() {
 void loop() {
   timeClient.update();
 
-  if (timeClient.getDay() == fastingDayIndex && doFastingDay) {
-    Serial.println("it's fasting day.");
-  } else {
-    if (timeClient.getHours() == feedHour1 && feedIndex == 0) {
-      // feed for first time today!
-      Serial.println("feeding first time!");
-      feedIndex++;
-      writePersistentStore();
-      feed();
-    } else if (timeClient.getHours() == feedHour2 && feedIndex == 1) {
-      Serial.println("feeding second time!");
-      // feed for second time today!
-      feedIndex++;
-      writePersistentStore();
-      feed();
-    }
+  if (doAutoFeed) {
+    if (timeClient.getDay() == fastingDayIndex && doFastingDay) {
+      Serial.println("it's fasting day.");
+    } else {
+      if (timeClient.getHours() == feedHour1 && feedIndex == 0) {
+        // feed for first time today!
+        Serial.println("feeding first time!");
+        feedIndex++;
+        writePersistentStore();
+        feed();
+      } else if (timeClient.getHours() == feedHour2 && feedIndex == 1) {
+        Serial.println("feeding second time!");
+        // feed for second time today!
+        feedIndex++;
+        writePersistentStore();
+        feed();
+      }
 
-    // reset feedIndex at midnight
-    if (timeClient.getHours() == 0 && timeClient.getMinutes() < 5 && feedIndex != 0) {
-      Serial.println("resetting.");
-      feedIndex = 0;
-      writePersistentStore();
+      // reset feedIndex at midnight
+      if (timeClient.getHours() == 0 && timeClient.getMinutes() < 5 && feedIndex != 0) {
+        Serial.println("resetting.");
+        feedIndex = 0;
+        writePersistentStore();
+      }
     }
   }
 
